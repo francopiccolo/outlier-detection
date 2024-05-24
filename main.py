@@ -47,7 +47,6 @@ def create_random_multiplier_array(n: int, m: int, p: float):
     random_numbers = np.random.uniform(low=0, high=2, size=(n, m))
     random_activation = np.random.choice([1, 0], p=[p, 1 - p], size=(n, m))
     random_multiplier = np.where(random_activation == 1, random_numbers, 1)
-    print(random_multiplier.T)
     return random_multiplier
 
 def generate_date_array(start_date: date, end_date: date) -> DatetimeIndex:
@@ -99,6 +98,7 @@ def load_data_to_sqlite(df: pd.DataFrame, table: str, db_path: str) -> None:
     engine = create_engine(db_path)
     df = df.reset_index()
     df['index'] = df['index'].dt.strftime('%Y-%m-%d')
+    df = pd.melt(df, id_vars=['index'], var_name='stock', value_name='price')
     df.to_sql(name=table, con=engine, if_exists='replace', index=False)
 
 
@@ -112,7 +112,7 @@ def get_data_from_sqlite(table: str, db_path: str) -> pd.DataFrame:
     engine = create_engine(db_path)
     df = pd.read_sql_table(table_name=table, con=engine)
     df['index'] = pd.to_datetime(df['index'])
-    df = df.set_index('index')
+    df = df.pivot_table('price', 'index', 'stock')
     return df
 
 def locate_and_replace_outliers_in_col(series: pd.Series) -> (pd.Series, int):
@@ -182,4 +182,4 @@ def pipeline(start_date: date, end_date: date, num_stocks: int, db_path: str, ta
     
 
 if __name__ == '__main__':
-    pipeline(start_date=START_DATE, end_date=END_DATE, num_stocks=NUM_STOCKS, db_path=DB_PATH, table_name=TABLE_NAME, randomization_prob=RANDOMIZATION_PROB)    
+    pipeline(start_date=START_DATE, end_date=END_DATE, num_stocks=NUM_STOCKS, db_path=DB_PATH, table_name=TABLE_NAME, randomization_prob=RANDOMIZATION_PROB)
