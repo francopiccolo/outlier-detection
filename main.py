@@ -8,15 +8,13 @@ from pandas import DatetimeIndex
 
 from config import DB_PATH, NUM_STOCKS, TABLE_NAME, START_DATE, END_DATE, RANDOMIZATION_PROB
 
-def generate_price_data(
-    n: int, m: int, mu: float = 0.08, sigma: float = 0.15, randomization_prob: float = 0.0001
+def generate_clean_price_data(
+    n: int, m: int, mu: float = 0.08, sigma: float = 0.15
     ):
     """
     Generate an array of plausible random stock prices histories.
     Each row of the array represents a different stock ticker.
     Each column of the array represents a different date.
-    1 out of 10000 values is multiplied by a random number between 0 and 2
-    The first price in each series is untouched by randomness
     :param n: number of stocks
     :param m: number of dates
     :param mu: annualised drift of the stock
@@ -28,10 +26,27 @@ def generate_price_data(
     S0 = np.random.uniform(10, 1000, size=(n, 1))
     mults = 1 + mu * dt + dW
     prices = np.cumprod(np.hstack((S0, mults)), axis=1)
+    return np.round(prices, decimals=2)
+
+def generate_price_data(
+    n: int, m: int, mu: float = 0.08, sigma: float = 0.15, randomization_prob: float = 0.0001
+    ):
+    """
+    Generate an array of plausible random stock prices histories.
+    With a probability of randomization_prob values are multiplied by a random number between 0 and 2
+    The first price in each series is untouched by randomness
+    :param n: number of stocks
+    :param m: number of dates
+    :param mu: annualised drift of the stock
+    :param sigma: annualised volatility of the stock
+    :return: n x m numpy array
+    """
+    clean_prices = generate_clean_price_data(n, m)
     random_multiplier = create_random_multiplier_array(n, m, randomization_prob)
     random_multiplier[:, 0] = 1
-    prices = np.multiply(prices, random_multiplier)
+    prices = np.multiply(clean_prices, random_multiplier)
     return np.round(prices, decimals=2)
+
 
 def create_random_multiplier_array(n: int, m: int, p: float):
     """
@@ -81,6 +96,7 @@ def create_test_data(start_date: date, end_date: date, num_stocks: int, randomiz
     :randomization_prob: Probability of randomizing a value from the test data
     :return: pd.DataFrame
     """
+    print('Creating test data')
     dates_array = generate_date_array(start_date=start_date, end_date=end_date)
     tickers = generate_tickers(n=num_stocks)
     data = generate_price_data(n=num_stocks, m=len(dates_array), randomization_prob=randomization_prob)
@@ -88,13 +104,13 @@ def create_test_data(start_date: date, end_date: date, num_stocks: int, randomiz
 
 def load_data_to_sqlite(df: pd.DataFrame, table: str, db_path: str) -> None:
     """
-    Loads the dataframe df to sqlite table table.
+    Melts the dataframe and loads it to sqlite table.
     :param df: Data dataframe
     :param table: SQLite table name
     :param db_path: SQLite db path
     :return: None
     """
-    
+    print('Loading data to SQLite')
     engine = create_engine(db_path)
     df = df.reset_index()
     df['index'] = df['index'].dt.strftime('%Y-%m-%d')
@@ -109,18 +125,23 @@ def get_data_from_sqlite(table: str, db_path: str) -> pd.DataFrame:
     :param db_path: SQLite db path
     :return: DataFrame
     """
+    print('Getting data from SQLite')
     engine = create_engine(db_path)
     df = pd.read_sql_table(table_name=table, con=engine)
     df['index'] = pd.to_datetime(df['index'])
-    df = df.pivot_table('price', 'index', 'stock')
+    df = df.pivot_table(values='price', index='index', columns='stock')
+    df.sort_index(inplace=True)
     return df
 
 def locate_and_replace_outliers_in_col(series: pd.Series) -> (pd.Series, int):
     """
     Locates outliers in a series stock price has jumped (e.g. more than 10%) vs
-the surrounding values.
-    After that replaces any outliers by the previous valid value the time series.
-    Also prints out the number of outliers found, bucketed by the first letter of the ticker.
+    the surrounding values. After that replaces any outliers by the previous valid value the time series.
+    Some unlikely edge cases are not covered at the moment but could be analysed:
+        - if there are consecutive outliers then they wouldn't be detected
+        - if there is one outlier, one not outlier and another outlier then the not outlier value would be marked as outlier
+        - if the last element of the series is an outlier it wouldnt be marked as outlier
+    The function also prints out the number of outliers found, bucketed by the first letter of the ticker.
     :param series: Series of stock prices for a ticker
     :return: Series of stock prices with their outliers removed, number of outliers removed
     """
@@ -136,19 +157,19 @@ the surrounding values.
     df['is_outlier'] = df[col_name] != df['new_val']
     num_outliers = sum(df['is_outlier'])
 
-    return series, num_outliers
+    return df['new_val'], num_outliers
 
 
 def locate_and_replace_outliers_in_df(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Locates outliers in the dataframe where the stock price has jumped (e.g. more than 10%) vs
-the surrounding values.
-    After that replaces any outliers by the previous valid value in each time series.
+    Locates outliers in the dataframe and replaces any outliers by the previous valid value in each time series.
     Also prints out the number of outliers found, bucketed by the first letter of the ticker.
     :param df: Stocks data dataframe
     :return: Dataframe with data without outliers
     """
+    print('Locating and replacing outliers')
     outliers = {}
+    total_outliers = 0
     for col in df.columns:
         new_col, num_outliers = locate_and_replace_outliers_in_col(df[col])
         df[col] = new_col
@@ -156,8 +177,11 @@ the surrounding values.
             outliers[col[0]] = num_outliers
         else:
             outliers[col[0]] += num_outliers
+        total_outliers += num_outliers
     
+    total_datapoints = df.shape[0]*df.shape[1]
     print('Number of outliers found, bucketed by the first letter of the ticker \n', outliers)
+    print('Outliers per 10k datapoints', total_outliers/total_datapoints*10000)
     return df
     
 
@@ -178,7 +202,6 @@ def pipeline(start_date: date, end_date: date, num_stocks: int, db_path: str, ta
     df = get_data_from_sqlite(table=table_name, db_path=db_path)
     df = locate_and_replace_outliers_in_df(df=df)
     load_data_to_sqlite(df=df, table=table_name, db_path=db_path)
-    # test locate_and_replace_outliers
     
 
 if __name__ == '__main__':
